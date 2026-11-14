@@ -87,6 +87,41 @@ export class HypeToken {
     }
   }
 
+  // ─── Option A: Fixed-rate buy — 1 NEAR = 1000 HYPE from rewards pool ────────
+  @call({ payableFunction: true })
+  buy_hype() {
+    const buyer    = near.predecessorAccountId();
+    const attached = near.attachedDeposit(); // yoctoNEAR
+    if (attached <= 0n) throw new Error("Attach NEAR to buy $HYPE");
+
+    // Auto-register storage if needed
+    if (!this.storageDeposits) this.storageDeposits = {};
+    if (!this.balances) this.balances = {};
+    if (!this.storageDeposits[buyer]) {
+      if (attached < STORAGE_COST_PER_ACCOUNT) {
+        throw new Error(`Need at least ${STORAGE_COST_PER_ACCOUNT} yoctoNEAR`);
+      }
+      this.storageDeposits[buyer] = STORAGE_COST_PER_ACCOUNT.toString();
+      this.balances[buyer] = this.balances[buyer] ?? "0";
+    }
+
+    // 1 NEAR (10^24 yocto) = 1000 HYPE
+    const ONE_NEAR = 1_000_000_000_000_000_000_000_000n;
+    const hypeAmt  = (attached * 1000n) / ONE_NEAR;
+    if (hypeAmt <= 0n) throw new Error("Amount too small to buy any $HYPE");
+
+    const pool = BigInt(this.rewardsPool);
+    const actual = hypeAmt > pool ? pool : hypeAmt;
+    if (actual === 0n) throw new Error("Rewards pool empty");
+
+    this.rewardsPool       = (pool - actual).toString();
+    this.circulatingSupply = (BigInt(this.circulatingSupply) + actual).toString();
+    this.balances[buyer]   = (BigInt(this.balances[buyer] ?? "0") + actual).toString();
+
+    near.log(`BUY: ${buyer} bought ${actual} $HYPE for ${attached} yoctoNEAR`);
+    return actual.toString();
+  }
+
   // ─── NEP-145: Storage Management ──────────────────────────────────────────
   // Required for Ref Finance and any DEX integration.
   // Accounts must deposit storage before receiving tokens.
