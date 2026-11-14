@@ -10,8 +10,8 @@ import {
 // ─── Immutable launch parameters ────────────────────────────────────────────
 const TOTAL_SUPPLY      = 1_000_000_000n; // 1B tokens (no decimals for simplicity)
 const REWARDS_POOL_PCT  = 60n;            // 60% in rewards pool
-const MINT_THRESHOLD    = 60;             // trends score >= 60 → mint
-const BURN_THRESHOLD    = 30;             // trends score < 30  → burn
+const MINT_THRESHOLD    = 96;             // trends score >= 96 → mint (calibrated to 1-H NEAR data)
+const BURN_THRESHOLD    = 91;             // trends score < 91  → burn
 const MINT_PER_TICK     = 10_000n;        // tokens released from pool per mint tick
 const BURN_PCT          = 2n;             // 2% of treasury burns per burn tick
 const STREAK_MULTIPLIER_THRESHOLD = 3;   // 3 consecutive mints → 1.5x next mint
