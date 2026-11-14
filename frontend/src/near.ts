@@ -1,119 +1,120 @@
-import { connect, keyStores, WalletConnection, Contract, utils } from "near-api-js";
+import { setupWalletSelector } from "@near-wallet-selector/core";
+import type { WalletSelector, AccountState } from "@near-wallet-selector/core";
+import { setupMeteorWallet } from "@near-wallet-selector/meteor-wallet";
+import { setupModal } from "@near-wallet-selector/modal-ui";
+import type { WalletSelectorModal } from "@near-wallet-selector/modal-ui";
+import { providers, utils } from "near-api-js";
 
 export const CONTRACT_ID = "hype-token-test.testnet";
 const NETWORK_ID = "testnet";
 
-const config = {
-  networkId: NETWORK_ID,
-  keyStore: new keyStores.BrowserLocalStorageKeyStore(),
-  nodeUrl: "https://rpc.testnet.near.org",
-  walletUrl: "https://wallet.meteorwallet.app",
-  helperUrl: "https://helper.testnet.near.org",
-};
+let _selector: WalletSelector | null = null;
+let _modal: WalletSelectorModal | null = null;
 
-let _near: Awaited<ReturnType<typeof connect>> | null = null;
-let _wallet: WalletConnection | null = null;
-
-export async function getNear() {
-  if (!_near) _near = await connect(config);
-  return _near;
+export async function getSelector(): Promise<WalletSelector> {
+  if (_selector) return _selector;
+  _selector = await setupWalletSelector({
+    network: NETWORK_ID,
+    modules: [setupMeteorWallet()],
+  });
+  return _selector;
 }
 
-export async function getWallet() {
-  if (!_wallet) {
-    const near = await getNear();
-    _wallet = new WalletConnection(near, "hype-app");
-  }
-  return _wallet;
+export async function getModal(): Promise<WalletSelectorModal> {
+  if (_modal) return _modal;
+  const selector = await getSelector();
+  _modal = setupModal(selector, { contractId: CONTRACT_ID });
+  return _modal;
 }
 
 export async function signIn() {
-  const wallet = await getWallet();
-  wallet.requestSignIn({ contractId: CONTRACT_ID });
+  const modal = await getModal();
+  modal.show();
 }
 
 export async function signOut() {
-  const wallet = await getWallet();
-  wallet.signOut();
+  const selector = await getSelector();
+  const wallet = await selector.wallet();
+  await wallet.signOut();
   window.location.reload();
 }
 
-export async function isSignedIn(): Promise<boolean> {
-  const wallet = await getWallet();
-  return wallet.isSignedIn();
-}
-
 export async function getAccountId(): Promise<string | null> {
-  const wallet = await getWallet();
-  return wallet.isSignedIn() ? wallet.getAccountId() : null;
+  const selector = await getSelector();
+  const accounts: AccountState[] = selector.store.getState().accounts;
+  const active = accounts.find(a => a.active);
+  return active?.accountId ?? null;
 }
 
-// ─── View calls (free, no gas) ────────────────────────────────────────────────
+// ─── RPC provider for view calls ─────────────────────────────────────────────
+function rpc() {
+  return new providers.JsonRpcProvider({ url: "https://rpc.testnet.near.org" });
+}
+
+async function viewFunction(methodName: string, args: object) {
+  const result = await rpc().query({
+    request_type: "call_function",
+    account_id: CONTRACT_ID,
+    method_name: methodName,
+    args_base64: btoa(JSON.stringify(args)),
+    finality: "optimistic",
+  }) as unknown as { result: number[] };
+  const bytes = new Uint8Array(result.result);
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
 
 export async function getContractState() {
-  const near = await getNear();
-  const account = await near.account(CONTRACT_ID);
-  return account.viewFunction({ contractId: CONTRACT_ID, methodName: "get_state", args: {} });
+  return viewFunction("get_state", {});
 }
 
 export async function getHistory() {
-  const near = await getNear();
-  const account = await near.account(CONTRACT_ID);
-  return account.viewFunction({ contractId: CONTRACT_ID, methodName: "get_history", args: {} });
+  return viewFunction("get_history", {});
 }
 
 export async function getBalance(accountId: string): Promise<string> {
-  const near = await getNear();
-  const account = await near.account(CONTRACT_ID);
-  return account.viewFunction({
-    contractId: CONTRACT_ID,
-    methodName: "ft_balance_of",
-    args: { account_id: accountId },
-  });
+  return viewFunction("ft_balance_of", { account_id: accountId });
 }
 
 export async function getStorageBalance(accountId: string) {
-  const near = await getNear();
-  const account = await near.account(CONTRACT_ID);
-  return account.viewFunction({
-    contractId: CONTRACT_ID,
-    methodName: "storage_balance_of",
-    args: { account_id: accountId },
-  });
+  return viewFunction("storage_balance_of", { account_id: accountId });
 }
 
-// ─── Write calls ──────────────────────────────────────────────────────────────
+// ─── Write calls via wallet-selector ─────────────────────────────────────────
+// wallet-selector actions use the FunctionCallAction shape (not NAJAction)
+type FunctionCallAction = {
+  type: "FunctionCall";
+  params: { methodName: string; args: object; gas: string; deposit: string };
+};
 
-const STORAGE_DEPOSIT = utils.format.parseNearAmount("0.00125")!; // 0.00125 NEAR
-const BUY_RATE = 1000n; // 1 NEAR = 1000 HYPE
+function fnCall(methodName: string, args: object, deposit: string): FunctionCallAction {
+  return {
+    type: "FunctionCall",
+    params: { methodName, args, gas: "30000000000000", deposit },
+  };
+}
+
+const STORAGE_DEPOSIT_YOCTO = "1250000000000000000000"; // 0.00125 NEAR
 
 export async function ensureStorageRegistered(accountId: string) {
   const existing = await getStorageBalance(accountId);
-  if (existing) return; // already registered
+  if (existing) return;
 
-  const wallet = await getWallet();
-  const account = wallet.account();
-  await account.functionCall({
-    contractId: CONTRACT_ID,
-    methodName: "storage_deposit",
-    args: { account_id: accountId, registration_only: true },
-    attachedDeposit: BigInt(STORAGE_DEPOSIT),
-    gas: BigInt("30000000000000"),
+  const selector = await getSelector();
+  const wallet = await selector.wallet();
+  await wallet.signAndSendTransaction({
+    receiverId: CONTRACT_ID,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    actions: [fnCall("storage_deposit", { account_id: accountId, registration_only: true }, STORAGE_DEPOSIT_YOCTO) as any],
   });
 }
 
 export async function buyHype(nearAmount: string): Promise<void> {
-  const wallet = await getWallet();
-  const account = wallet.account();
-  const yocto = BigInt(utils.format.parseNearAmount(nearAmount)!);
-
-  // storage_deposit is also the buy — contract grants tokens for NEAR attached
-  // We call buy_hype on the contract (Option A fixed rate)
-  await account.functionCall({
-    contractId: CONTRACT_ID,
-    methodName: "buy_hype",
-    args: {},
-    attachedDeposit: yocto,
-    gas: BigInt("30000000000000"),
+  const yocto = utils.format.parseNearAmount(nearAmount)!;
+  const selector = await getSelector();
+  const wallet = await selector.wallet();
+  await wallet.signAndSendTransaction({
+    receiverId: CONTRACT_ID,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    actions: [fnCall("buy_hype", {}, yocto) as any],
   });
 }

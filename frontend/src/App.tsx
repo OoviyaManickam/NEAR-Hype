@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import {
-  signIn, signOut, isSignedIn, getAccountId,
+  signIn, signOut, getAccountId, getSelector,
   getContractState, getHistory, getBalance, ensureStorageRegistered,
   buyHype, CONTRACT_ID,
 } from "./near";
@@ -76,13 +76,17 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const signed = await isSignedIn();
-      if (signed) {
-        const id = await getAccountId();
-        setAccountId(id);
-      }
+      const id = await getAccountId();
+      setAccountId(id);
       setWalletReady(true);
       await refresh();
+
+      // Subscribe to wallet-selector account changes (connect/disconnect)
+      const selector = await getSelector();
+      selector.store.observable.subscribe((state) => {
+        const active = state.accounts.find(a => a.active);
+        setAccountId(active?.accountId ?? null);
+      });
     })();
   }, [refresh]);
 
