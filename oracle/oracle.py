@@ -13,8 +13,8 @@ log = logging.getLogger("hype-oracle")
 # ─── Config ───────────────────────────────────────────────────────────────────
 KEYWORD         = "NEAR"
 POLL_INTERVAL   = 120          # seconds (2 minutes)
-CONTRACT_ID     = "hype.testnet"   # update after deploy
-ORACLE_ACCOUNT  = "hype-oracle.testnet"  # update after deploy
+CONTRACT_ID     = "hype-token-test.testnet"
+ORACLE_ACCOUNT  = "hype-token-test.testnet"
 NETWORK         = "testnet"
 
 # ─── Fetch Google Trends score ─────────────────────────────────────────────────
@@ -39,31 +39,30 @@ def fetch_score(keyword: str) -> int:
 
 # ─── Push score to NEAR contract ───────────────────────────────────────────────
 def push_score(score: int) -> bool:
-    """Calls update_score on the NEAR contract via near-cli-rs."""
+    """Calls update_score on the NEAR contract via near-cli v4."""
     args = json.dumps({"score": score})
     cmd = [
-        "near", "contract", "call-function",
-        "as-transaction", CONTRACT_ID, "update_score",
-        "json-args", args,
-        "prepaid-gas", "30.0 Tgas",
-        "attached-deposit", "0 NEAR",
-        "sign-as", ORACLE_ACCOUNT,
-        "network-config", NETWORK,
-        "sign-with-keychain", "send"
+        "near", "call", CONTRACT_ID, "update_score",
+        args,
+        "--accountId", ORACLE_ACCOUNT,
+        "--networkId", NETWORK,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30,
+            env={**__import__("os").environ, "PATH": "/Users/I578433/.npm-global/bin:" + __import__("os").environ.get("PATH", "")}
+        )
         if result.returncode == 0:
-            log.info(f"Score {score} pushed to contract. TX: {result.stdout[:100]}")
+            log.info(f"Score {score} pushed to contract. TX: {result.stdout[:150]}")
             return True
         else:
-            log.error(f"NEAR CLI error: {result.stderr[:200]}")
+            log.error(f"NEAR CLI error: {result.stderr[:300]}")
             return False
     except subprocess.TimeoutExpired:
         log.error("NEAR CLI call timed out")
         return False
     except FileNotFoundError:
-        log.error("near-cli-rs not found — install with: cargo install near-cli-rs")
+        log.error("near-cli not found — ensure /Users/I578433/.npm-global/bin is on PATH")
         return False
 
 # ─── Main loop ─────────────────────────────────────────────────────────────────
