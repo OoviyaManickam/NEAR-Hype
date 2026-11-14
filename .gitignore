@@ -1,0 +1,12 @@
+node_modules/
+contract/node_modules/
+frontend/node_modules/
+contract/build/builder.c
+contract/build/code.h
+contract/build/methods.h
+contract/build/hype.js
+contract/build/hype.js.map
+.env
+__pycache__/
+*.pyc
+.DS_Store

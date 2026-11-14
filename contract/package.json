@@ -1,0 +1,13 @@
+{
+  "name": "hype-contract",
+  "version": "1.0.0",
+  "description": "$HYPE — the attention token. Supply controlled by Google Trends.",
+  "main": "src/hype.js",
+  "scripts": {
+    "build": "near-sdk-js build src/hype.js build/hype.wasm"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "near-sdk-js": "^2.0.0"
+  }
+}
