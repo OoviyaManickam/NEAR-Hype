@@ -8,34 +8,40 @@ import {
 } from "near-sdk-js";
 
 // ─── Immutable launch parameters ────────────────────────────────────────────
-const TOTAL_SUPPLY      = 1_000_000_000n; // 1B tokens (no decimals for simplicity)
-const REWARDS_POOL_PCT  = 60n;            // 60% in rewards pool
-const MINT_THRESHOLD    = 92;             // trends score >= 92 → mint (calibrated to 1-H NEAR data)
-const BURN_THRESHOLD    = 87;             // trends score < 87  → burn
-const MINT_PER_TICK     = 10_000n;        // tokens released from pool per mint tick
-const BURN_PCT          = 2n;             // 2% of treasury burns per burn tick
-const STREAK_MULTIPLIER_THRESHOLD = 3;   // 3 consecutive mints → 1.5x next mint
-const STREAK_BONUS_PCT  = 50n;           // +50% on streak bonus tick
+const TOTAL_SUPPLY                = 1_000_000_000n; // 1B tokens
+const REWARDS_POOL_PCT            = 60n;             // 60% in rewards pool
+const MINT_THRESHOLD              = 92;              // trends score >= 92 → mint
+const BURN_THRESHOLD              = 87;              // trends score < 87  → burn
+const MINT_PER_TICK               = 10_000n;         // tokens released per mint tick
+const BURN_PCT                    = 2n;              // 2% of treasury burns per tick
+const STREAK_MULTIPLIER_THRESHOLD = 3;               // 3 consecutive mints → bonus
+const STREAK_BONUS_PCT            = 50n;             // +50% on streak bonus tick
+
+// NEP-145 storage cost — 0.00125 NEAR per account (125 * 10^19 yoctoNEAR)
+const STORAGE_COST_PER_ACCOUNT = 1_250_000_000_000_000_000_000n;
 
 @NearBindgen({})
 export class HypeToken {
   constructor() {
     // Token metadata
-    this.name           = "HYPE";
-    this.symbol         = "HYPE";
-    this.keyword        = "NEAR";          // locked forever at deploy
+    this.name    = "HYPE";
+    this.symbol  = "HYPE";
+    this.keyword = "NEAR"; // locked forever at deploy
 
     // Supply state
-    this.totalSupply    = TOTAL_SUPPLY.toString();
-    this.rewardsPool    = ((TOTAL_SUPPLY * REWARDS_POOL_PCT) / 100n).toString();
-    this.treasury       = ((TOTAL_SUPPLY * 20n) / 100n).toString();
-    this.circulatingSupply = ((TOTAL_SUPPLY * 20n) / 100n).toString(); // 20% initial liquidity
+    this.totalSupply       = TOTAL_SUPPLY.toString();
+    this.rewardsPool       = ((TOTAL_SUPPLY * REWARDS_POOL_PCT) / 100n).toString();
+    this.treasury          = ((TOTAL_SUPPLY * 20n) / 100n).toString();
+    this.circulatingSupply = ((TOTAL_SUPPLY * 20n) / 100n).toString();
 
     // Balances map: account_id → amount (string)
-    this.balances       = {};
+    this.balances = {};
+
+    // Storage deposits map: account_id → yoctoNEAR deposited (string)
+    this.storageDeposits = {};
 
     // Oracle state
-    this.oracleAccount  = "";              // set at init
+    this.oracleAccount  = "";
     this.latestScore    = 0;
     this.lastUpdateTime = 0;
 
@@ -46,22 +52,21 @@ export class HypeToken {
     this.longestStreak    = 0;
 
     // History (last 50 events)
-    this.history        = [];
+    this.history = [];
   }
 
   @initialize({})
   init({ oracle_account, owner_account }) {
     this.oracleAccount = oracle_account;
-    // Give owner the initial liquidity allocation
     const initLiquidity = (TOTAL_SUPPLY * 20n) / 100n;
-    this.balances[owner_account] = initLiquidity.toString();
+    this.balances[owner_account]        = initLiquidity.toString();
+    this.storageDeposits[owner_account] = STORAGE_COST_PER_ACCOUNT.toString();
     near.log(`$HYPE initialized. Oracle: ${oracle_account}. Keyword: ${this.keyword}`);
   }
 
   // ─── Oracle: update trends score ──────────────────────────────────────────
   @call({})
   update_score({ score }) {
-    // Only the oracle account can call this
     if (near.predecessorAccountId() !== this.oracleAccount) {
       throw new Error("Unauthorized: only oracle can update score");
     }
@@ -70,17 +75,209 @@ export class HypeToken {
     }
 
     this.latestScore    = score;
-    this.lastUpdateTime = Number(near.blockTimestamp() / 1_000_000n); // ms
+    this.lastUpdateTime = Number(near.blockTimestamp() / 1_000_000n);
 
     if (score >= MINT_THRESHOLD) {
       this._mint(score);
     } else if (score < BURN_THRESHOLD) {
       this._burn();
     } else {
-      // neutral zone — reset streak
       this.consecutiveMints = 0;
       this._addHistory("neutral", score, 0n);
     }
+  }
+
+  // ─── NEP-145: Storage Management ──────────────────────────────────────────
+  // Required for Ref Finance and any DEX integration.
+  // Accounts must deposit storage before receiving tokens.
+
+  @call({ payableFunction: true })
+  storage_deposit({ account_id, registration_only }) {
+    const accountId = account_id ?? near.predecessorAccountId();
+    const attached  = near.attachedDeposit();
+    const minCost   = STORAGE_COST_PER_ACCOUNT;
+
+    if (!this.storageDeposits) this.storageDeposits = {};
+    if (!this.balances) this.balances = {};
+
+    const existing = BigInt(this.storageDeposits[accountId] ?? "0");
+
+    if (existing >= minCost) {
+      near.log(`Account ${accountId} already registered. Refunding.`);
+      const promise = NearPromise.new(near.predecessorAccountId());
+      promise.transfer(attached);
+      return promise;
+    }
+
+    if (attached < minCost) {
+      throw new Error(`Requires at least ${minCost} yoctoNEAR for storage`);
+    }
+
+    this.storageDeposits[accountId] = minCost.toString();
+    this.balances[accountId]        = this.balances[accountId] ?? "0";
+
+    const refund = attached - minCost;
+    if (refund > 0n) {
+      const promise = NearPromise.new(near.predecessorAccountId());
+      promise.transfer(refund);
+      near.log(`Account ${accountId} registered. Refunding excess: ${refund}`);
+      return promise;
+    }
+
+    near.log(`Account ${accountId} registered for storage.`);
+  }
+
+  @call({ payableFunction: true })
+  storage_withdraw({ amount }) {
+    const accountId  = near.predecessorAccountId();
+    if (!this.storageDeposits) throw new Error("Not registered");
+    const deposited  = BigInt(this.storageDeposits[accountId] ?? "0");
+    const minCost    = STORAGE_COST_PER_ACCOUNT;
+
+    if (deposited < minCost) {
+      throw new Error("Not registered");
+    }
+
+    // Can only withdraw excess above minimum (if any)
+    const withdrawable = deposited - minCost;
+    const withdrawAmt  = amount ? BigInt(amount) : withdrawable;
+
+    if (withdrawAmt > withdrawable) {
+      throw new Error("Not enough excess storage to withdraw");
+    }
+
+    this.storageDeposits[accountId] = (deposited - withdrawAmt).toString();
+
+    const promise = NearPromise.new(accountId);
+    promise.transfer(withdrawAmt + 1n); // +1 yocto as per NEP-145 spec
+    near.log(`Storage withdrawn: ${withdrawAmt} to ${accountId}`);
+    return promise;
+  }
+
+  @view({})
+  storage_balance_of({ account_id }) {
+    if (!this.storageDeposits || !(account_id in this.storageDeposits)) return null;
+    const deposited = BigInt(this.storageDeposits[account_id] ?? "0");
+    if (deposited === 0n) return null;
+    return {
+      total:     deposited.toString(),
+      available: (deposited - STORAGE_COST_PER_ACCOUNT).toString(),
+    };
+  }
+
+  @view({})
+  storage_balance_bounds() {
+    return {
+      min: STORAGE_COST_PER_ACCOUNT.toString(),
+      max: STORAGE_COST_PER_ACCOUNT.toString(),
+    };
+  }
+
+  // ─── NEP-141: ft_transfer_call (required for DEX deposits) ────────────────
+  @call({ payableFunction: true })
+  ft_transfer_call({ receiver_id, amount, memo, msg }) {
+    const sender  = near.predecessorAccountId();
+    const sendBal = BigInt(this.balances[sender] ?? "0");
+    const amt     = BigInt(amount);
+
+    if (amt <= 0n) throw new Error("Amount must be > 0");
+    if (sendBal < amt) throw new Error("Insufficient balance");
+    if (!this.storageDeposits[receiver_id]) {
+      throw new Error(`Receiver ${receiver_id} not registered`);
+    }
+
+    // Deduct from sender immediately
+    this.balances[sender]      = (sendBal - amt).toString();
+    this.balances[receiver_id] = (BigInt(this.balances[receiver_id] ?? "0") + amt).toString();
+
+    near.log(`TRANSFER_CALL: ${sender} → ${receiver_id}: ${amount} msg=${msg}`);
+
+    // Call ft_on_transfer on receiver contract, then handle unused amount
+    return NearPromise.new(receiver_id)
+      .functionCall(
+        "ft_on_transfer",
+        JSON.stringify({ sender_id: sender, amount, msg: msg ?? "" }),
+        0n,
+        10_000_000_000_000n // 10 TGas
+      )
+      .then(
+        NearPromise.new(near.currentAccountId()).functionCall(
+          "ft_resolve_transfer",
+          JSON.stringify({ sender_id: sender, receiver_id, amount }),
+          0n,
+          10_000_000_000_000n
+        )
+      );
+  }
+
+  // Called internally after ft_on_transfer resolves
+  @call({})
+  ft_resolve_transfer({ sender_id, receiver_id, amount }) {
+    // Read how much the receiver actually used (returned by ft_on_transfer)
+    let unusedAmount = 0n;
+    try {
+      const result = JSON.parse(near.promiseResult(0));
+      unusedAmount = BigInt(result);
+    } catch (_) {
+      // If promise failed treat all as unused — refund sender
+      unusedAmount = BigInt(amount);
+    }
+
+    if (unusedAmount > 0n) {
+      const receiverBal = BigInt(this.balances[receiver_id] ?? "0");
+      const refund      = unusedAmount > receiverBal ? receiverBal : unusedAmount;
+      this.balances[receiver_id] = (receiverBal - refund).toString();
+      this.balances[sender_id]   = (BigInt(this.balances[sender_id] ?? "0") + refund).toString();
+      near.log(`RESOLVE: refunded ${refund} to ${sender_id}`);
+    }
+
+    return (BigInt(amount) - unusedAmount).toString();
+  }
+
+  // ─── NEP-141 core transfer ─────────────────────────────────────────────────
+  @call({ payableFunction: true })
+  ft_transfer({ receiver_id, amount, memo }) {
+    if (!this.storageDeposits) this.storageDeposits = {};
+    if (!this.balances) this.balances = {};
+    const sender  = near.predecessorAccountId();
+    const sendBal = BigInt(this.balances[sender] ?? "0");
+    const amt     = BigInt(amount);
+
+    if (amt <= 0n) throw new Error("Amount must be > 0");
+    if (sendBal < amt) throw new Error("Insufficient balance");
+    if (!this.storageDeposits[receiver_id]) {
+      throw new Error(`Receiver ${receiver_id} not registered. Call storage_deposit first.`);
+    }
+
+    this.balances[sender]      = (sendBal - amt).toString();
+    this.balances[receiver_id] = (BigInt(this.balances[receiver_id] ?? "0") + amt).toString();
+
+    near.log(`TRANSFER: ${sender} → ${receiver_id}: ${amount}`);
+  }
+
+  // ─── NEP-141 metadata ─────────────────────────────────────────────────────
+  @view({})
+  ft_metadata() {
+    return {
+      spec:          "ft-1.0.0",
+      name:          "HYPE Token",
+      symbol:        "HYPE",
+      icon:          null,
+      reference:     null,
+      reference_hash: null,
+      decimals:      0,
+    };
+  }
+
+  // ─── NEP-141 core views ───────────────────────────────────────────────────
+  @view({})
+  ft_total_supply() {
+    return this.totalSupply;
+  }
+
+  @view({})
+  ft_balance_of({ account_id }) {
+    return this.balances[account_id] ?? "0";
   }
 
   // ─── Internal mint ────────────────────────────────────────────────────────
@@ -96,16 +293,13 @@ export class HypeToken {
       this.longestStreak = this.consecutiveMints;
     }
 
-    // Apply streak bonus every STREAK_MULTIPLIER_THRESHOLD consecutive mints
     let amount = MINT_PER_TICK;
     if (this.consecutiveMints % STREAK_MULTIPLIER_THRESHOLD === 0) {
       amount = amount + (amount * STREAK_BONUS_PCT) / 100n;
       near.log(`Streak bonus applied! ${this.consecutiveMints} consecutive mints`);
     }
 
-    // Cap at remaining pool
-    const actual = amount > pool ? pool : amount;
-
+    const actual           = amount > pool ? pool : amount;
     this.rewardsPool       = (pool - actual).toString();
     this.circulatingSupply = (BigInt(this.circulatingSupply) + actual).toString();
     this.totalMintEvents  += 1;
@@ -122,12 +316,11 @@ export class HypeToken {
       return;
     }
 
-    this.consecutiveMints = 0; // reset streak on burn
-
-    const burnAmount = (treasury * BURN_PCT) / 100n;
-    this.treasury        = (treasury - burnAmount).toString();
-    this.totalSupply     = (BigInt(this.totalSupply) - burnAmount).toString();
-    this.totalBurnEvents += 1;
+    this.consecutiveMints = 0;
+    const burnAmount       = (treasury * BURN_PCT) / 100n;
+    this.treasury          = (treasury - burnAmount).toString();
+    this.totalSupply       = (BigInt(this.totalSupply) - burnAmount).toString();
+    this.totalBurnEvents  += 1;
 
     this._addHistory("burn", this.latestScore, burnAmount);
     near.log(`BURN: ${burnAmount} $HYPE burned. Treasury remaining: ${this.treasury}`);
@@ -138,58 +331,29 @@ export class HypeToken {
     this.history.push({
       type,
       score,
-      amount: amount.toString(),
+      amount:    amount.toString(),
       timestamp: Number(near.blockTimestamp() / 1_000_000n),
     });
-    if (this.history.length > 50) {
-      this.history.shift();
-    }
-  }
-
-  // ─── NEP-141 core views ───────────────────────────────────────────────────
-  @view({})
-  ft_total_supply() {
-    return this.totalSupply;
-  }
-
-  @view({})
-  ft_balance_of({ account_id }) {
-    return this.balances[account_id] ?? "0";
-  }
-
-  // ─── NEP-141 transfer ─────────────────────────────────────────────────────
-  @call({})
-  ft_transfer({ receiver_id, amount, memo }) {
-    const sender  = near.predecessorAccountId();
-    const sendBal = BigInt(this.balances[sender] ?? "0");
-    const amt     = BigInt(amount);
-
-    if (amt <= 0n) throw new Error("Amount must be > 0");
-    if (sendBal < amt) throw new Error("Insufficient balance");
-
-    this.balances[sender]      = (sendBal - amt).toString();
-    this.balances[receiver_id] = (BigInt(this.balances[receiver_id] ?? "0") + amt).toString();
-
-    near.log(`TRANSFER: ${sender} → ${receiver_id}: ${amount}`);
+    if (this.history.length > 50) this.history.shift();
   }
 
   // ─── Dashboard views ──────────────────────────────────────────────────────
   @view({})
   get_state() {
     return {
-      keyword:           this.keyword,
-      latestScore:       this.latestScore,
-      lastUpdateTime:    this.lastUpdateTime,
-      totalSupply:       this.totalSupply,
+      keyword:          this.keyword,
+      latestScore:      this.latestScore,
+      lastUpdateTime:   this.lastUpdateTime,
+      totalSupply:      this.totalSupply,
       circulatingSupply: this.circulatingSupply,
-      rewardsPool:       this.rewardsPool,
-      treasury:          this.treasury,
-      consecutiveMints:  this.consecutiveMints,
-      longestStreak:     this.longestStreak,
-      totalMintEvents:   this.totalMintEvents,
-      totalBurnEvents:   this.totalBurnEvents,
-      mintThreshold:     MINT_THRESHOLD,
-      burnThreshold:     BURN_THRESHOLD,
+      rewardsPool:      this.rewardsPool,
+      treasury:         this.treasury,
+      consecutiveMints: this.consecutiveMints,
+      longestStreak:    this.longestStreak,
+      totalMintEvents:  this.totalMintEvents,
+      totalBurnEvents:  this.totalBurnEvents,
+      mintThreshold:    MINT_THRESHOLD,
+      burnThreshold:    BURN_THRESHOLD,
     };
   }
 
