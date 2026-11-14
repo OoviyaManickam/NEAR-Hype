@@ -4,6 +4,7 @@ import { setupMeteorWallet } from "@near-wallet-selector/meteor-wallet";
 import { setupModal } from "@near-wallet-selector/modal-ui";
 import type { WalletSelectorModal } from "@near-wallet-selector/modal-ui";
 import { providers, utils } from "near-api-js";
+import { actionCreators } from "@near-js/transactions";
 
 export const CONTRACT_ID = "hype-token-test.testnet";
 const NETWORK_ID = "testnet";
@@ -14,7 +15,13 @@ let _modal: WalletSelectorModal | null = null;
 export async function getSelector(): Promise<WalletSelector> {
   if (_selector) return _selector;
   _selector = await setupWalletSelector({
-    network: NETWORK_ID,
+    network: {
+      networkId: NETWORK_ID,
+      nodeUrl: "https://rpc.testnet.near.org",
+      helperUrl: "https://helper.testnet.near.org",
+      explorerUrl: "https://testnet.nearblocks.io",
+      indexerUrl: "https://testnet-api.kitwallet.app",
+    },
     modules: [setupMeteorWallet()],
   });
   return _selector;
@@ -48,7 +55,7 @@ export async function getAccountId(): Promise<string | null> {
 
 // ─── RPC provider for view calls ─────────────────────────────────────────────
 function rpc() {
-  return new providers.JsonRpcProvider({ url: "https://rpc.testnet.near.org" });
+  return new providers.JsonRpcProvider({ url: "http://localhost:5173/rpc" });
 }
 
 async function viewFunction(methodName: string, args: object) {
@@ -80,20 +87,8 @@ export async function getStorageBalance(accountId: string) {
 }
 
 // ─── Write calls via wallet-selector ─────────────────────────────────────────
-// wallet-selector actions use the FunctionCallAction shape (not NAJAction)
-type FunctionCallAction = {
-  type: "FunctionCall";
-  params: { methodName: string; args: object; gas: string; deposit: string };
-};
-
-function fnCall(methodName: string, args: object, deposit: string): FunctionCallAction {
-  return {
-    type: "FunctionCall",
-    params: { methodName, args, gas: "30000000000000", deposit },
-  };
-}
-
 const STORAGE_DEPOSIT_YOCTO = "1250000000000000000000"; // 0.00125 NEAR
+const GAS = BigInt("30000000000000");
 
 export async function ensureStorageRegistered(accountId: string) {
   const existing = await getStorageBalance(accountId);
@@ -103,18 +98,25 @@ export async function ensureStorageRegistered(accountId: string) {
   const wallet = await selector.wallet();
   await wallet.signAndSendTransaction({
     receiverId: CONTRACT_ID,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    actions: [fnCall("storage_deposit", { account_id: accountId, registration_only: true }, STORAGE_DEPOSIT_YOCTO) as any],
+    actions: [
+      actionCreators.functionCall(
+        "storage_deposit",
+        { account_id: accountId, registration_only: true },
+        GAS,
+        BigInt(STORAGE_DEPOSIT_YOCTO)
+      ),
+    ],
   });
 }
 
 export async function buyHype(nearAmount: string): Promise<void> {
-  const yocto = utils.format.parseNearAmount(nearAmount)!;
+  const yocto = BigInt(utils.format.parseNearAmount(nearAmount)!);
   const selector = await getSelector();
   const wallet = await selector.wallet();
   await wallet.signAndSendTransaction({
     receiverId: CONTRACT_ID,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    actions: [fnCall("buy_hype", {}, yocto) as any],
+    actions: [
+      actionCreators.functionCall("buy_hype", {}, GAS, yocto),
+    ],
   });
 }
